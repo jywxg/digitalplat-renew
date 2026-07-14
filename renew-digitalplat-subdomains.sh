@@ -26,26 +26,75 @@ TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:?错误: 请先设置环境变量 TELEGRAM_
 
 # 获取域名列表 (Cloudflare bypass via cloudscraper Python helper)
 echo "正在获取域名列表..."
-response=$(python3 "$HELPER" "/domains" "Bearer ${API_KEY}" 2>/dev/null) || {
-    echo "错误: cloudscraper 无法绕过 Cloudflare challenge" >&2
-    exit 1
-}
+DEBUG_OUTPUT=$(mktemp)
+response=$(python3 "$HELPER" "/domains" "Bearer ${API_KEY}" --debug 2>"$DEBUG_OUTPUT")
+cf_debug=$(cat "$DEBUG_OUTPUT")
+rm -f "$DEBUG_OUTPUT"
 
-jq -e '.success == true and (.data | type == "array")' <<<"$response" >/dev/null || {
-    echo "错误: 查询域名失败: $(jq -c . <<<"$response" 2>/dev/null || printf '%s' "$response")" >&2
+# 输出调试信息到 stderr (方便查看)
+if [[ "$cf_debug" == *RAW_RESPONSE* ]]; then
+    echo "=== CF Debug Output ===" >&2
+    echo "$cf_debug" >&2
+fi
+
+# 尝试多种可能的 JSON 结构
+# 结构 1: { "success": true, "data": [...] }
+# 结构 2: [ {...}, {...} ]  直接数组
+# 结构 3: { "data": {...} } 或 { "domains": [...] }
+
+domain_list=""
+is_array=0
+
+# 检查是否是数组
+if echo "$response" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    echo "API 返回: 直接数组" >&2
+    domain_list=$(echo "$response" | jq '.')
+    is_array=1
+# 检查是否有 .success + .data
+elif echo "$response" | jq -e '.success == true and (.data | type == "array")' >/dev/null 2>&1; then
+    echo "API 返回: {success:true, data:[]}" >&2
+    domain_list=$(echo "$response" | jq '.data')
+    is_array=0
+# 检查 .data 直接是数组
+elif echo "$response" | jq -e '.data | type == "array"' >/dev/null 2>&1; then
+    echo "API 返回: {data:[]}" >&2
+    domain_list=$(echo "$response" | jq '.data')
+    is_array=0
+# 检查 .domains
+elif echo "$response" | jq -e '.domains | type == "array"' >/dev/null 2>&1; then
+    echo "API 返回: {domains:[]}" >&2
+    domain_list=$(echo "$response" | jq '.domains')
+    is_array=0
+else
+    echo "错误: 无法解析 API 响应" >&2
+    echo "原始响应: $response" >&2
+    echo "CF debug: $cf_debug" >&2
     exit 1
-}
+fi
 
 # 解析域名数据
-jq -r '.data[] | [.name, .status, .expiry_date, .slot_type, .lifecycle_type] | @tsv' <<<"$response" | \
+jq -r '.[] | [.name, .status, .expiry_date, .slot_type, .lifecycle_type] | @tsv' <<<"$domain_list" | \
     while IFS=$'\t' read -r name status expiry_date slot_type lifecycle_type; do
         echo "$name|$status|$expiry_date|$slot_type|$lifecycle_type"
     done > /tmp/digitalplat_domains_$$
 
+# 如果没有解析到数据，尝试字段名不同的情况
+if [[ ! -s /tmp/digitalplat_domains_$$ ]]; then
+    echo "警告: 未解析到数据，尝试其他字段名..." >&2
+    jq -r '.[] | [.name // .domain, .status // .state, .expiry_date // .expiry // .expire, .slot_type // .slot, .lifecycle_type // .lifecycle // .type] | @tsv' <<<"$domain_list" | \
+        while IFS=$'\t' read -r name status expiry_date slot_type lifecycle_type; do
+            if [[ -n "$name" && "$name" != "null" ]]; then
+                echo "${name}|${status}|${expiry_date}|${slot_type}|${lifecycle_type}"
+            fi
+        done > /tmp/digitalplat_domains_$$
+fi
+
+echo "已解析 $(wc -l < /tmp/digitalplat_domains_$$) 个域名" >&2
+
 # 判断是否需要续期
 needs_renewal() {
     local expiry="$1"
-    if [[ "$expiry" == "null" || -z "$expiry" ]]; then
+    if [[ "$expiry" == "null" || -z "$expiry" || "$expiry" == "permanent" || "$expiry" == "PERMANENT" ]]; then
         echo "no"
         return
     fi
@@ -68,6 +117,7 @@ printf '%-30s %-12s %-12s %-12s %-12s %s\n' \
     "------------------------------" "------------" "------------" "------------" "------------" "------"
 
 while IFS='|' read -r name status expiry_date slot_type lifecycle_type; do
+    [[ -z "$name" || "$name" == "null" ]] && continue
     renew=$(needs_renewal "$expiry_date")
     printf '%-30s %-12s %-12s %-12s %-12s %s\n' \
         "$name" "$status" "$expiry_date" "$slot_type" "$lifecycle_type" "$renew"
@@ -82,12 +132,13 @@ renewal_needed=0
 renewal_count=0
 
 while IFS='|' read -r name status expiry_date slot_type lifecycle_type; do
+    [[ -z "$name" || "$name" == "null" ]] && continue
     renew=$(needs_renewal "$expiry_date")
     if [[ "$renew" == "yes" ]]; then
-        ((renewal_needed++))
+        ((renewal_needed++)) || true
         notification_lines+=("⚠️ <code>${name}</code> - 到期: ${expiry_date} | 需续期")
     fi
-    ((renewal_count++))
+    ((renewal_count++)) || true
 done < /tmp/digitalplat_domains_$$
 
 notification_lines+=("")
