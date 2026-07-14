@@ -1,0 +1,33 @@
+name: DigitalPlat Domains Renew
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 每天北京时间 09:00（UTC 01:00）
+    - cron: "0 1 * * *"
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Make script executable
+        run: chmod +x renew-digitalplat-subdomains.sh
+
+      - name: Run script
+        env:
+          DIGITALPLAT_API_KEY: ${{ secrets.DIGITALPLAT_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          ./renew-digitalplat-subdomains.sh
