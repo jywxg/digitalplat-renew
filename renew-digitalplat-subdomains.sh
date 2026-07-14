@@ -138,13 +138,34 @@ while IFS='|' read -r name status expiry_date slot_type lifecycle_type; do
         ((renewal_needed++)) || true
         notification_lines+=("⚠️ <code>${name}</code> - 到期: ${expiry_date} | 需续期")
     fi
+    # 永久到期判断
+    if [[ "$expiry_date" == "permanent" || "$expiry_date" == "PERMANENT" || "$expiry_date" == "null" || -z "$expiry_date" ]]; then
+        is_permanent="是"
+    else
+        is_permanent="否"
+    fi
     ((renewal_count++)) || true
+done < /tmp/digitalplat_domains_$$
+
+# 重新遍历，构建域名详情列表
+detail_lines=()
+while IFS='|' read -r name status expiry_date slot_type lifecycle_type; do
+    [[ -z "$name" || "$name" == "null" ]] && continue
+    if [[ "$expiry_date" == "permanent" || "$expiry_date" == "PERMANENT" || "$expiry_date" == "null" || -z "$expiry_date" ]]; then
+        is_permanent="是"
+    else
+        is_permanent="否"
+    fi
+    detail_lines+=("<code>${name}</code> | 永久: ${is_permanent}")
 done < /tmp/digitalplat_domains_$$
 
 notification_lines+=("")
 notification_lines+=("📊 共 ${renewal_count} 个域名")
-notification_lines+=("⚠️ ${renewal_needed} 个域名需在 120 天内续期")
+for dl in "${detail_lines[@]}"; do
+    notification_lines+=("  ${dl}")
+done
 notification_lines+=("")
+notification_lines+=("⚠️ ${renewal_needed} 个域名需在 120 天内续期")
 notification_lines+=("🔗 <a href=\"https://dash.domain.digitalplat.org/dashboard\">前往 Dashboard 续期</a>")
 notification_lines+=("")
 notification_lines+=("⚠️ API 未暴露 renewal 接口，需手动在 dashboard 操作")
