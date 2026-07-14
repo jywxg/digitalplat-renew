@@ -37,6 +37,11 @@ if [[ "$cf_debug" == *RAW_RESPONSE* ]]; then
     echo "$cf_debug" >&2
 fi
 
+# === DEBUG: 打印原始 JSON 结构 ===
+echo "=== RAW API RESPONSE (debug) ===" >&2
+echo "$response" | jq '.' >&2 2>/dev/null || echo "$response" >&2
+echo "=== END DEBUG ===" >&2
+
 # 尝试多种可能的 JSON 结构
 # 结构 1: { "success": true, "data": [...] }
 # 结构 2: [ {...}, {...} ]  直接数组
