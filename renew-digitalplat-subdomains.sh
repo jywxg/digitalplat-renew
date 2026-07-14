@@ -3,26 +3,33 @@
 # API: https://domain-api.digitalplat.org/api/v1
 # 列出所有域名，检查到期时间，发送 Telegram 通知
 # 续期需在 dashboard 手动操作（API 未暴露 renewal endpoint）
+# Cloudflare bypass: uses cloudscraper Python helper (digitalplat_api_helper.py)
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HELPER="${SCRIPT_DIR}/digitalplat_api_helper.py"
 API_BASE="https://domain-api.digitalplat.org/api/v1"
 RENEWAL_WINDOW_DAYS=120  # DigitalPlat 政策：120 天内可免费续期
 
 # 检查依赖
-for cmd in curl jq; do
-    command -v "$cmd" >/dev/null || { echo "错误: 缺少依赖 $cmd" >&2; exit 1; }
-done
+if ! python3 -c "import cloudscraper" 2>/dev/null; then
+    echo "错误: 缺少 cloudscraper，运行: pip3 install cloudscraper" >&2
+    exit 1
+fi
+command -v jq >/dev/null || { echo "错误: 缺少依赖 jq" >&2; exit 1; }
 
 # API Key 从环境变量读取
 API_KEY="${DIGITALPLAT_API_KEY:?错误: 请先设置环境变量 DIGITALPLAT_API_KEY}"
 TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:?错误: 请先设置环境变量 TELEGRAM_BOT_TOKEN}"
 TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:?错误: 请先设置环境变量 TELEGRAM_CHAT_ID}"
 
-# 获取域名列表
-response=$(curl --fail-with-body --silent --show-error \
-    "${API_BASE}/domains" \
-    -H "Authorization: Bearer ${API_KEY}")
+# 获取域名列表 (Cloudflare bypass via cloudscraper Python helper)
+echo "正在获取域名列表..."
+response=$(python3 "$HELPER" "/domains" "Bearer ${API_KEY}" 2>/dev/null) || {
+    echo "错误: cloudscraper 无法绕过 Cloudflare challenge" >&2
+    exit 1
+}
 
 jq -e '.success == true and (.data | type == "array")' <<<"$response" >/dev/null || {
     echo "错误: 查询域名失败: $(jq -c . <<<"$response" 2>/dev/null || printf '%s' "$response")" >&2
