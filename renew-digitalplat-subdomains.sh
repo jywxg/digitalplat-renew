@@ -37,11 +37,6 @@ if [[ "$cf_debug" == *RAW_RESPONSE* ]]; then
     echo "$cf_debug" >&2
 fi
 
-# === DEBUG: 打印原始 JSON 结构 ===
-echo "=== RAW API RESPONSE (debug) ===" >&2
-echo "$response" | jq '.' >&2 2>/dev/null || echo "$response" >&2
-echo "=== END DEBUG ===" >&2
-
 # 尝试多种可能的 JSON 结构
 # 结构 1: { "success": true, "data": [...] }
 # 结构 2: [ {...}, {...} ]  直接数组
@@ -166,11 +161,9 @@ done < /tmp/digitalplat_domains_$$
 
 notification_lines+=("")
 notification_lines+=("📊 共 ${renewal_count} 个域名")
-for dl in "${detail_lines[@]}"; do
-    notification_lines+=("  ${dl}")
-done
 notification_lines+=("")
 notification_lines+=("⚠️ ${renewal_needed} 个域名需在 120 天内续期")
+notification_lines+=("")
 notification_lines+=("🔗 <a href=\"https://dash.domain.digitalplat.org/dashboard\">前往 Dashboard 续期</a>")
 notification_lines+=("")
 notification_lines+=("⚠️ API 未暴露 renewal 接口，需手动在 dashboard 操作")
