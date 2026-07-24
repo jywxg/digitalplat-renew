@@ -20,7 +20,7 @@
 
 ## 📋 功能
 
-- ✅ 通过 DigitalPlat API v1 获取域名列表（自动绕过 Cloudflare 验证）
+- ✅ 通过 DigitalPlat API v1 获取域名列表（cloudscraper 绕过 Cloudflare 验证）
 - ✅ 兼容多种 API 响应格式（`{success,data}` / 直接数组 / `{data}`）
 - ✅ 检查每个域名的到期时间，自动识别永久到期
 - ✅ 标记 120 天窗口内需续期的域名
@@ -28,41 +28,15 @@
 - ✅ 通过 Telegram Bot 发送通知（支持长消息分片）
 - ✅ 支持 GitHub Actions 定时运行
 
+---
+
 ## 🚀 快速使用
 
-### 1. 克隆仓库
+### 通过 GitHub Actions 运行
 
-```bash
-git clone https://github.com/GaoZitian/digitalplat-renew.git
-cd digitalplat-renew
-```
-
-### 2. 安装依赖
-
-```bash
-pip3 install cloudscraper
-```
-
-### 3. 设置环境变量
-
-```bash
-export DIGITALPLAT_API_KEY="dp_live_xxxxxxxxx"
-export TELEGRAM_BOT_TOKEN="your_bot_token"
-export TELEGRAM_CHAT_ID="your_chat_id"
-```
-
-### 4. 运行
-
-```bash
-chmod +x renew-digitalplat-subdomains.sh
-./renew-digitalplat-subdomains.sh
-```
-
-## ⚙️ GitHub Actions 定时运行
-
-仓库包含 GitHub Actions 工作流（`.github/workflows/renew-digitalplat-subdomains.yml`）。
-
-**所需 Secrets：**
+1. Fork 本仓库到你的 GitHub 账号
+2. 进入 **Settings → Secrets and variables → Actions**
+3. 添加以下 Secrets：
 
 | Secret | 说明 |
 |--------|------|
@@ -70,7 +44,50 @@ chmod +x renew-digitalplat-subdomains.sh
 | `TELEGRAM_BOT_TOKEN` | Telegram Bot Token |
 | `TELEGRAM_CHAT_ID` | 接收通知的 Chat ID |
 
+4. 到 **Actions** 页面手动触发一次 `renew-digitalplat` 工作流验证配置
+5. 成功后，工作流会按 Schedule 每天自动运行
+
 **Schedule：** 每天北京时间 09:00（UTC 01:00）
+
+---
+
+### 本地运行
+
+```bash
+git clone https://github.com/GaoZitian/digitalplat-renew.git
+cd digitalplat-renew
+
+# 安装依赖
+pip3 install cloudscraper
+brew install jq  # macOS
+
+# 设置环境变量
+export DIGITALPLAT_API_KEY="***"
+export TELEGRAM_BOT_TOKEN="***"
+export TELEGRAM_CHAT_ID="your_chat_id"
+
+# 运行
+chmod +x renew-digitalplat-subdomains.sh
+./renew-digitalplat-subdomains.sh
+```
+
+---
+
+## ⚙️ GitHub Actions 配置
+
+工作流文件：`.github/workflows/renew-digitalplat.yml`
+
+```yaml
+name: 免费域名续期检查
+on:
+  schedule:
+    - cron: '0 1 * * *'   # UTC 01:00 = 北京时间 09:00
+  workflow_dispatch:       # 支持手动触发
+```
+
+> 注意： Secrets 在 fork 后需要重新设置，不会从 upstream 继承。
+
+---
 
 ## 📦 依赖
 
@@ -80,16 +97,20 @@ chmod +x renew-digitalplat-subdomains.sh
 | `jq` | JSON 解析 |
 | `python3` ≥ 3.8 | 脚本运行环境 |
 
-> **注意：** 不再使用 `curl` 直接请求 DigitalPlat API（会被 Cloudflare 拦截），改用 `cloudscraper` 模拟浏览器通过验证。
+脚本内部通过 `cloudscraper` 调用 `digitalplat_api_helper.py` 发起请求，不再直接使用 `curl`（会被 Cloudflare 拦截）。
+
+---
 
 ## 📂 项目结构
 
 ```
-├── renew-digitalplat-subdomains.sh   # 主脚本
+├── renew-digitalplat-subdomains.sh   # 主脚本（域名检查 + Telegram 通知）
 ├── digitalplat_api_helper.py         # API 请求代理（Cloudflare bypass）
 └── .github/workflows/
-    └── renew-digitalplat-subdomains.yml  # GitHub Actions 配置
+    └── renew-digitalplat.yml         # GitHub Actions 定时任务
 ```
+
+---
 
 ## 🔗 API 参考
 
@@ -97,6 +118,6 @@ chmod +x renew-digitalplat-subdomains.sh
 |------|------|------|
 | `domain-api.digitalplat.org/api/v1/domains` | `GET` | 获取所有域名列表 |
 
-**认证：** `Authorization: Bearer dp_live_xxx`（生产）或 `dp_test_xxx`（测试）
+**认证：** `Authorization: Bearer *** `dp_test_xxx`（测试）
 
-## 📄 许可
+> API 未暴露 renewal 端点，续期需在 Dashboard 手动操作。
