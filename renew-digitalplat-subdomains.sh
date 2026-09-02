@@ -1,386 +1,699 @@
 #!/usr/bin/env bash
-# DigitalPlat Domain Renewal Checker
-# API: https://domain-api.digitalplat.org/api/v1
-# 列出所有域名，检查到期时间，发送 Telegram 通知
-# 续期需在 dashboard 手动操作（API 未暴露 renewal endpoint）
-# Cloudflare bypass: uses cloudscraper Python helper (digitalplat_api_helper.py)
 
-set -euo pipefail
+# ============================================================
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HELPER="${SCRIPT_DIR}/digitalplat_api_helper.py"
-API_BASE="https://domain-api.digitalplat.org/api/v1"
-RENEWAL_WINDOW_DAYS=120
+# DigitalPlat 域名状态检查与续期脚本
 
-DOMAIN_FILE="$(mktemp)"
-DEBUG_OUTPUT="$(mktemp)"
-trap 'rm -f "$DOMAIN_FILE" "$DEBUG_OUTPUT"' EXIT
+#
+
+# 功能：
+
+# 1. 获取 DigitalPlat 域名列表
+
+# 2. 判断永久域名 / 普通域名
+
+# 3. 显示实际到期时间
+
+# 4. 计算可续期开始时间
+
+# 5. 判断是否已进入续期窗口
+
+# 6. 统计永久、待续期、已过期域名
+
+# 7. Telegram 发送通知
+
+# ============================================================
+
+set -Eeuo pipefail
+
+# ------------------------------------------------------------
+
+# 配置
+
+# ------------------------------------------------------------
+
+# API 地址
+
+DIGITALPLAT_API_URL="${DIGITALPLAT_API_URL:-https://domain.digitalplat.org/api/domain/list}"
+
+# 续期窗口（单位：天）
+
+# 例如 120 表示距离到期 120 天以内进入续期窗口
+
+RENEWAL_WINDOW_DAYS="${RENEWAL_WINDOW_DAYS:-120}"
+
+# Telegram API
+
+TELEGRAM_API="https://api.telegram.org"
+
+# ------------------------------------------------------------
+
+# 临时文件
+
+# ------------------------------------------------------------
+
+TMP_DIR="$(mktemp -d)"
+DOMAIN_FILE="$TMP_DIR/domains.txt"
+RESPONSE_FILE="$TMP_DIR/response.json"
+
+cleanup() {
+rm -rf "$TMP_DIR"
+}
+
+trap cleanup EXIT
+
+# ------------------------------------------------------------
 
 # 检查依赖
-if ! command -v python3 >/dev/null 2>&1; then
-    echo "错误: 缺少 python3" >&2
-    exit 1
-fi
 
-if ! python3 -c "import cloudscraper" 2>/dev/null; then
-    echo "错误: 缺少 cloudscraper，运行: pip3 install cloudscraper" >&2
-    exit 1
-fi
-
-command -v jq >/dev/null 2>&1 || {
-    echo "错误: 缺少依赖 jq" >&2
-    exit 1
-}
+# ------------------------------------------------------------
 
 command -v curl >/dev/null 2>&1 || {
-    echo "错误: 缺少依赖 curl" >&2
-    exit 1
+echo "错误：未找到 curl"
+exit 1
 }
 
-[[ -f "$HELPER" ]] || {
-    echo "错误: 找不到 $HELPER" >&2
-    exit 1
+command -v jq >/dev/null 2>&1 || {
+echo "错误：未找到 jq"
+exit 1
 }
 
-# API Key / Telegram 配置
-API_KEY="${DIGITALPLAT_API_KEY:?错误: 请先设置环境变量 DIGITALPLAT_API_KEY}"
-TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:?错误: 请先设置环境变量 TELEGRAM_BOT_TOKEN}"
-TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:?错误: 请先设置环境变量 TELEGRAM_CHAT_ID}"
-
-# HTML 转义，防止域名中出现特殊字符导致 Telegram HTML 解析失败
-html_escape() {
-    printf '%s' "$1" |
-        sed -e 's/&/\&amp;/g' \
-            -e 's/</\&lt;/g' \
-            -e 's/>/\&gt;/g'
+command -v date >/dev/null 2>&1 || {
+echo "错误：未找到 date"
+exit 1
 }
 
-# 判断是否为永久域名
-is_permanent() {
-    local expiry="$1"
+# ------------------------------------------------------------
 
-    [[ "$expiry" == "permanent" ||
-       "$expiry" == "PERMANENT" ||
-       "$expiry" == "null" ||
-       -z "$expiry" ]]
+# 检查环境变量
+
+# ------------------------------------------------------------
+
+if [[ -z "${DIGITALPLAT_API_KEY:-}" ]]; then
+echo "错误：DIGITALPLAT_API_KEY 未设置"
+exit 1
+fi
+
+# ------------------------------------------------------------
+
+# 工具函数
+
+# ------------------------------------------------------------
+
+is_permanent_domain() {
+
+```
+local expiry_date="${1:-}"
+local slot_type="${2:-}"
+local lifecycle_type="${3:-}"
+
+expiry_date="${expiry_date,,}"
+slot_type="${slot_type,,}"
+lifecycle_type="${lifecycle_type,,}"
+
+# slot_type=permanent 明确视为永久域名
+if [[ "$slot_type" == "permanent" ]]; then
+    return 0
+fi
+
+# expiry_date 返回永久类型
+case "$expiry_date" in
+    permanent|free|unlimited|never|infinite)
+        return 0
+        ;;
+esac
+
+# lifecycle_type 可能存在永久标识
+case "$lifecycle_type" in
+    permanent|free|unlimited)
+        return 0
+        ;;
+esac
+
+return 1
+```
+
 }
 
-# 计算剩余天数
-# 返回值：
-#   0  = 无法解析
-#   正数 = 剩余天数
-#   负数 = 已过期天数
-get_days_left() {
-    local expiry="$1"
-    local expiry_epoch now_epoch
+format_date() {
 
-    if is_permanent "$expiry"; then
-        echo "0"
-        return
-    fi
+```
+local value="${1:-}"
 
-    expiry_epoch=$(date -d "$expiry" +%s 2>/dev/null) || {
-        echo "0"
-        return
-    }
+if [[ -z "$value" || "$value" == "null" ]]; then
+    echo "未知"
+    return
+fi
 
-    now_epoch=$(date +%s)
-    echo $(( (expiry_epoch - now_epoch) / 86400 ))
+local epoch
+
+epoch="$(date -d "$value" +%s 2>/dev/null || true)"
+
+if [[ -z "$epoch" ]]; then
+    echo "$value"
+    return
+fi
+
+date -d "@$epoch" "+%Y-%m-%d"
+```
+
 }
 
-# 判断是否需要续期
-needs_renewal() {
-    local expiry="$1"
-    local days_left
+get_domain_info() {
 
-    if is_permanent "$expiry"; then
-        echo "no"
-        return
-    fi
+```
+local expiry_date="${1:-}"
+local slot_type="${2:-}"
+local lifecycle_type="${3:-}"
 
-    days_left="$(get_days_left "$expiry")"
+# --------------------------------------------------------
+# 永久域名
+# --------------------------------------------------------
 
-    # 无法解析日期时不自动判断为需要续期
-    if [[ "$days_left" == "0" ]] && ! date -d "$expiry" +%s >/dev/null 2>&1; then
-        echo "no"
-        return
-    fi
+if is_permanent_domain \
+    "$expiry_date" \
+    "$slot_type" \
+    "$lifecycle_type"
+then
 
-    # 保持原脚本逻辑：120 天以内（包括已过期）进入处理范围
-    if (( days_left <= RENEWAL_WINDOW_DAYS )); then
-        echo "yes"
-    else
-        echo "no"
-    fi
+    echo "PERMANENT|永久|无需续期|永久|无需续期"
+    return
+fi
+
+# --------------------------------------------------------
+# 无有效到期时间
+# --------------------------------------------------------
+
+if [[ -z "$expiry_date" || "$expiry_date" == "null" ]]; then
+
+    echo "UNKNOWN|未知|未知|未知|无法判断"
+    return
+fi
+
+# --------------------------------------------------------
+# 解析到期时间
+# --------------------------------------------------------
+
+local expiry_epoch
+
+expiry_epoch="$(date -d "$expiry_date" +%s 2>/dev/null || true)"
+
+if [[ -z "$expiry_epoch" ]]; then
+
+    echo "UNKNOWN|$expiry_date|未知|未知|无法解析"
+    return
+fi
+
+# 当前时间
+local now_epoch
+
+now_epoch="$(date +%s)"
+
+# 实际到期日期
+local actual_expiry
+
+actual_expiry="$(date -d "@$expiry_epoch" "+%Y-%m-%d")"
+
+# --------------------------------------------------------
+# 可续期开始时间
+# --------------------------------------------------------
+
+local renewal_epoch
+
+renewal_epoch=$((expiry_epoch - RENEWAL_WINDOW_DAYS * 86400))
+
+local renewal_date
+
+renewal_date="$(date -d "@$renewal_epoch" "+%Y-%m-%d")"
+
+# --------------------------------------------------------
+# 剩余天数
+# --------------------------------------------------------
+
+local days_left
+
+days_left=$(( (expiry_epoch - now_epoch) / 86400 ))
+
+# --------------------------------------------------------
+# 已过期
+# --------------------------------------------------------
+
+if (( days_left < 0 )); then
+
+    echo "EXPIRED|$actual_expiry|$renewal_date|已过期|已过期"
+    return
+fi
+
+# --------------------------------------------------------
+# 已进入续期窗口
+# --------------------------------------------------------
+
+if (( days_left <= RENEWAL_WINDOW_DAYS )); then
+
+    echo "RENEWABLE|$actual_expiry|$renewal_date|${days_left}天|可以续期"
+    return
+fi
+
+# --------------------------------------------------------
+# 正常，尚未进入续期窗口
+# --------------------------------------------------------
+
+echo "VALID|$actual_expiry|$renewal_date|${days_left}天|未到续期时间"
+```
+
 }
 
-# 格式化有效期
-format_expiry() {
-    local expiry="$1"
+send_telegram_message() {
 
-    if is_permanent "$expiry"; then
-        echo "永久"
-        return
-    fi
+```
+local message="$1"
 
-    # 尽量统一成 YYYY-MM-DD；失败则保留 API 原值
-    date -d "$expiry" '+%Y-%m-%d' 2>/dev/null || printf '%s' "$expiry"
+# 未配置 Telegram 时跳过
+if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
+    echo "未配置 TELEGRAM_BOT_TOKEN，跳过 Telegram 通知"
+    return 0
+fi
+
+if [[ -z "${TELEGRAM_CHAT_ID:-}" ]]; then
+    echo "未配置 TELEGRAM_CHAT_ID，跳过 Telegram 通知"
+    return 0
+fi
+
+local telegram_url
+
+telegram_url="${TELEGRAM_API}/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
+
+local response
+
+response="$(
+    curl \
+        --silent \
+        --show-error \
+        --fail \
+        --max-time 30 \
+        -X POST \
+        "$telegram_url" \
+        -d "chat_id=${TELEGRAM_CHAT_ID}" \
+        --data-urlencode "text=${message}" \
+        -d "disable_web_page_preview=true"
+)" || {
+    echo "Telegram 通知发送失败"
+    return 1
 }
+
+if echo "$response" | jq -e '.ok == true' >/dev/null 2>&1; then
+
+    echo "Telegram 通知已发送"
+
+else
+
+    echo "Telegram API 返回异常："
+    echo "$response"
+    return 1
+fi
+```
+
+}
+
+# ============================================================
 
 # 获取域名列表
+
+# ============================================================
+
 echo "正在获取域名列表..."
 
-response=$(python3 "$HELPER" "/domains" "Bearer ${API_KEY}" --debug 2>"$DEBUG_OUTPUT")
-cf_debug="$(cat "$DEBUG_OUTPUT")"
+HTTP_CODE="$(
+curl 
+--silent 
+--show-error 
+--location 
+--max-time 30 
+--output "$RESPONSE_FILE" 
+--write-out "%{http_code}" 
+"$DIGITALPLAT_API_URL" 
+-H "Authorization: Bearer ${DIGITALPLAT_API_KEY}" 
+-H "Content-Type: application/json"
+)"
 
-if [[ "$cf_debug" == *RAW_RESPONSE* ]]; then
-    echo "=== CF Debug Output ===" >&2
-    echo "$cf_debug" >&2
+if [[ "$HTTP_CODE" != "200" ]]; then
+
+```
+echo "获取域名列表失败，HTTP 状态码：$HTTP_CODE"
+
+echo "API 返回："
+
+cat "$RESPONSE_FILE" || true
+
+exit 1
+```
+
 fi
 
-# 尝试多种 JSON 结构
-domain_list=""
+# ------------------------------------------------------------
 
-if echo "$response" | jq -e 'type == "array"' >/dev/null 2>&1; then
-    echo "API 返回: 直接数组" >&2
-    domain_list="$(echo "$response" | jq '.')"
+# 检查 JSON
 
-elif echo "$response" | jq -e '.success == true and (.data | type == "array")' >/dev/null 2>&1; then
-    echo "API 返回: {success:true, data:[]}" >&2
-    domain_list="$(echo "$response" | jq '.data')"
+# ------------------------------------------------------------
 
-elif echo "$response" | jq -e '.data | type == "array"' >/dev/null 2>&1; then
-    echo "API 返回: {data:[]}" >&2
-    domain_list="$(echo "$response" | jq '.data')"
+if ! jq empty "$RESPONSE_FILE" >/dev/null 2>&1; then
 
-elif echo "$response" | jq -e '.domains | type == "array"' >/dev/null 2>&1; then
-    echo "API 返回: {domains:[]}" >&2
-    domain_list="$(echo "$response" | jq '.domains')"
+```
+echo "错误：API 返回不是有效 JSON"
 
-else
-    echo "错误: 无法解析 API 响应" >&2
-    echo "原始响应: $response" >&2
-    echo "CF debug: $cf_debug" >&2
-    exit 1
+cat "$RESPONSE_FILE"
+
+exit 1
+```
+
 fi
 
-# 解析域名数据
+# ------------------------------------------------------------
+
+# 检查 API success
+
+# ------------------------------------------------------------
+
+API_SUCCESS="$(jq -r '.success // empty' "$RESPONSE_FILE")"
+
+if [[ "$API_SUCCESS" != "true" ]]; then
+
+```
+echo "DigitalPlat API 返回失败"
+
+cat "$RESPONSE_FILE"
+
+exit 1
+```
+
+fi
+
+# ------------------------------------------------------------
+
+# 检查 data
+
+# ------------------------------------------------------------
+
+DOMAIN_COUNT="$(jq '.data | length' "$RESPONSE_FILE" 2>/dev/null || echo "0")"
+
+if [[ ! "$DOMAIN_COUNT" =~ ^[0-9]+$ ]]; then
+
+```
+echo "无法解析域名数量"
+
+cat "$RESPONSE_FILE"
+
+exit 1
+```
+
+fi
+
+# ------------------------------------------------------------
+
+# 导出域名
+
+# ------------------------------------------------------------
+
 jq -r '
-    .[] |
-    [
-        (.name // .domain // ""),
-        (.status // .state // ""),
-        (.expiry_date // .expiry // .expire // ""),
-        (.slot_type // .slot // ""),
-        (.lifecycle_type // .lifecycle // .type // "")
-    ] | @tsv
-' <<<"$domain_list" |
-while IFS=$'\t' read -r name status expiry_date slot_type lifecycle_type; do
-    [[ -z "$name" || "$name" == "null" ]] && continue
-    printf '%s|%s|%s|%s|%s\n' \
-        "$name" "$status" "$expiry_date" "$slot_type" "$lifecycle_type"
-done > "$DOMAIN_FILE"
+.data[]
+|
+[
+(.name // .domain // ""),
+(.status // ""),
+(.expiry_date // .expiration_date // .expires_at // ""),
+(.slot_type // ""),
+(.lifecycle_type // "")
+]
+|
+@tsv
+' "$RESPONSE_FILE" > "$DOMAIN_FILE"
 
-domain_count="$(grep -cve '^$' "$DOMAIN_FILE" || true)"
-
-echo "已解析 ${domain_count} 个域名" >&2
-
-if (( domain_count == 0 )); then
-    echo "错误: API 返回 0 个可识别域名" >&2
-    exit 1
-fi
-
-# 打印本地表格
-printf '%-35s %-12s %-22s %-12s %-12s %s\n' \
-    "域名" "状态" "有效期" "Slot Type" "Lifecycle" "需续期"
-
-printf '%-35s %-12s %-22s %-12s %-12s %s\n' \
-    "-----------------------------------" \
-    "------------" \
-    "----------------------" \
-    "------------" \
-    "------------" \
-    "------"
-
-while IFS='|' read -r name status expiry_date slot_type lifecycle_type; do
-    [[ -z "$name" || "$name" == "null" ]] && continue
-
-    renew="$(needs_renewal "$expiry_date")"
-    formatted_expiry="$(format_expiry "$expiry_date")"
-
-    if is_permanent "$expiry_date"; then
-        display_status="永久"
-    else
-        days_left="$(get_days_left "$expiry_date")"
-
-        if (( days_left < 0 )); then
-            display_status="已过期"
-        elif (( days_left <= RENEWAL_WINDOW_DAYS )); then
-            display_status="需续期"
-        else
-            display_status="正常"
-        fi
-    fi
-
-    printf '%-35s %-12s %-22s %-12s %-12s %s\n' \
-        "$name" \
-        "$status" \
-        "$formatted_expiry" \
-        "$slot_type" \
-        "$lifecycle_type" \
-        "$renew"
-done < "$DOMAIN_FILE"
+echo "API 请求成功"
+echo "已解析 ${DOMAIN_COUNT} 个域名"
+echo
 
 # ============================================================
-# Telegram 通知
+
+# 初始化统计
+
 # ============================================================
 
-notification_lines=()
-
-notification_lines+=("<b>🌐 DigitalPlat 域名状态</b>")
-notification_lines+=("")
+total_count=0
 
 renewal_needed=0
+
 expired_count=0
+
 permanent_count=0
-normal_count=0
-renewal_count=0
 
-# 先统计
-while IFS='|' read -r name status expiry_date slot_type lifecycle_type; do
-    [[ -z "$name" || "$name" == "null" ]] && continue
+valid_count=0
 
-    ((renewal_count++)) || true
+unknown_count=0
 
-    if is_permanent "$expiry_date"; then
-        ((permanent_count++)) || true
-        continue
-    fi
+# ============================================================
 
-    days_left="$(get_days_left "$expiry_date")"
+# 输出表头
 
-    if (( days_left < 0 )); then
-        ((expired_count++)) || true
-    elif (( days_left <= RENEWAL_WINDOW_DAYS )); then
-        ((renewal_needed++)) || true
-    else
-        ((normal_count++)) || true
-    fi
+# ============================================================
+
+printf "%-32s %-8s %-15s %-15s %-10s %s\n" 
+"域名" 
+"状态" 
+"实际到期时间" 
+"可续期时间" 
+"距到期" 
+"续期状态"
+
+printf "%s\n" 
+"---------------------------------------------------------------------------------------------------------------"
+
+# ============================================================
+
+# Telegram 消息
+
+# ============================================================
+
+TELEGRAM_MESSAGE="📊 DigitalPlat 域名状态检查
+
+"
+
+# ============================================================
+
+# 遍历域名
+
+# ============================================================
+
+while IFS=$'\t' read -r 
+name 
+status 
+expiry_date 
+slot_type 
+lifecycle_type
+do
+
+```
+[[ -z "$name" ]] && continue
+
+# --------------------------------------------------------
+# 域名总数
+# --------------------------------------------------------
+
+total_count=$((total_count + 1))
+
+
+# --------------------------------------------------------
+# 获取域名状态信息
+# --------------------------------------------------------
+
+info="$(
+    get_domain_info \
+        "$expiry_date" \
+        "$slot_type" \
+        "$lifecycle_type"
+)"
+
+
+IFS='|' read -r \
+    domain_type \
+    actual_expiry \
+    renewal_date \
+    days_left \
+    renewal_status \
+    <<< "$info"
+
+
+# --------------------------------------------------------
+# 控制台表格
+# --------------------------------------------------------
+
+printf "%-32s %-8s %-15s %-15s %-10s %s\n" \
+    "$name" \
+    "$status" \
+    "$actual_expiry" \
+    "$renewal_date" \
+    "$days_left" \
+    "$renewal_status"
+
+
+# --------------------------------------------------------
+# Telegram 域名状态
+# --------------------------------------------------------
+
+case "$domain_type" in
+
+    PERMANENT)
+
+        permanent_count=$((permanent_count + 1))
+
+        TELEGRAM_MESSAGE+="♾️ ${name}
+```
+
+状态：${status}
+实际到期：永久
+可续期时间：无需续期
+续期状态：无需续期
+
+"
+;;
+
+```
+    VALID)
+
+        valid_count=$((valid_count + 1))
+
+        TELEGRAM_MESSAGE+="✅ ${name}
+```
+
+状态：${status}
+实际到期：${actual_expiry}
+可续期开始：${renewal_date}
+距离到期：${days_left}
+续期状态：${renewal_status}
+
+"
+;;
+
+```
+    RENEWABLE)
+
+        renewal_needed=$((renewal_needed + 1))
+
+        TELEGRAM_MESSAGE+="⚠️ ${name}
+```
+
+状态：${status}
+实际到期：${actual_expiry}
+可续期开始：${renewal_date}
+距离到期：${days_left}
+续期状态：可以续期
+
+"
+;;
+
+```
+    EXPIRED)
+
+        expired_count=$((expired_count + 1))
+
+        TELEGRAM_MESSAGE+="❌ ${name}
+```
+
+状态：${status}
+实际到期：${actual_expiry}
+可续期开始：${renewal_date}
+续期状态：已过期
+
+"
+;;
+
+```
+    *)
+
+        unknown_count=$((unknown_count + 1))
+
+        TELEGRAM_MESSAGE+="❓ ${name}
+```
+
+状态：${status}
+实际到期：${actual_expiry}
+可续期时间：${renewal_date}
+续期状态：${renewal_status}
+
+"
+;;
+esac
+
 done < "$DOMAIN_FILE"
 
-notification_lines+=("📊 域名总数：<b>${renewal_count}</b>")
-notification_lines+=("⚠️ 待处理：<b>${renewal_needed}</b>")
-notification_lines+=("🔴 已过期：<b>${expired_count}</b>")
-notification_lines+=("♾️ 永久域名：<b>${permanent_count}</b>")
-notification_lines+=("🟢 正常域名：<b>${normal_count}</b>")
-notification_lines+=("")
-notification_lines+=("━━━━━━━━━━━━━━━━")
+# ============================================================
 
-# 所有域名完整列表
-index=0
+# 输出统计
 
-while IFS='|' read -r name status expiry_date slot_type lifecycle_type; do
-    [[ -z "$name" || "$name" == "null" ]] && continue
+# ============================================================
 
-    ((index++)) || true
+echo
 
-    safe_name="$(html_escape "$name")"
-    safe_status="$(html_escape "$status")"
-    formatted_expiry="$(format_expiry "$expiry_date")"
-    days_left="$(get_days_left "$expiry_date")"
+echo "域名总数: $total_count"
 
-    if is_permanent "$expiry_date"; then
-        notification_lines+=("")
-        notification_lines+=("<b>${index}️⃣ ${safe_name}</b>")
-        notification_lines+=("♾️ 有效期：<b>永久</b>")
-        notification_lines+=("🟢 状态：永久")
-    else
-        safe_expiry="$(html_escape "$formatted_expiry")"
+echo "正常域名: $valid_count"
 
-        if (( days_left < 0 )); then
-            expired_days=$(( -days_left ))
+echo "需要续期: $renewal_needed"
 
-            notification_lines+=("")
-            notification_lines+=("<b>${index}️⃣ ${safe_name}</b>")
-            notification_lines+=("📅 有效期：<b>${safe_expiry}</b>")
-            notification_lines+=("⏳ 已过期：<b>${expired_days} 天</b>")
-            notification_lines+=("🔴 状态：<b>已过期，需处理</b>")
+echo "已过期: $expired_count"
 
-        elif (( days_left <= RENEWAL_WINDOW_DAYS )); then
+echo "永久域名: $permanent_count"
 
-            notification_lines+=("")
-            notification_lines+=("<b>${index}️⃣ ${safe_name}</b>")
-            notification_lines+=("📅 有效期：<b>${safe_expiry}</b>")
-            notification_lines+=("⏳ 剩余：<b>${days_left} 天</b>")
-            notification_lines+=("⚠️ 状态：<b>需要续期</b>")
+echo "未知状态: $unknown_count"
 
-        else
+# ============================================================
 
-            notification_lines+=("")
-            notification_lines+=("<b>${index}️⃣ ${safe_name}</b>")
-            notification_lines+=("📅 有效期：<b>${safe_expiry}</b>")
-            notification_lines+=("⏳ 剩余：<b>${days_left} 天</b>")
-            notification_lines+=("🟢 状态：正常")
-        fi
-    fi
+# Telegram 汇总
 
-done < "$DOMAIN_FILE"
+# ============================================================
 
-notification_lines+=("")
-notification_lines+=("━━━━━━━━━━━━━━━━")
-notification_lines+=("")
+TELEGRAM_MESSAGE+="────────────────────
 
-if (( renewal_needed > 0 || expired_count > 0 )); then
-    notification_lines+=("⚠️ 有域名进入续期/处理范围")
-    notification_lines+=("📌 续期窗口：${RENEWAL_WINDOW_DAYS} 天")
+📊 域名汇总
+
+域名总数：${total_count}
+正常域名：${valid_count}
+需要续期：${renewal_needed}
+已过期：${expired_count}
+永久域名：${permanent_count}
+未知状态：${unknown_count}
+
+"
+
+# ============================================================
+
+# 最终状态
+
+# ============================================================
+
+if (( expired_count > 0 )); then
+
+```
+TELEGRAM_MESSAGE+="❌ 存在已过期域名"
+```
+
+elif (( renewal_needed > 0 )); then
+
+```
+TELEGRAM_MESSAGE+="⚠️ 存在可续期域名"
+```
+
 else
-    notification_lines+=("✅ 所有非永久域名均无需续期")
+
+```
+TELEGRAM_MESSAGE+="✅ 所有域名状态正常"
+```
+
 fi
 
-notification_lines+=("")
-notification_lines+=("🔗 <a href=\"https://dash.domain.digitalplat.org/dashboard\">前往 DigitalPlat Dashboard</a>")
-notification_lines+=("")
-notification_lines+=("ℹ️ API 未暴露 renewal 接口，需手动在 Dashboard 操作")
+# ============================================================
 
-# Telegram 发送函数
-send_telegram() {
-    local text="$1"
+# 发送 Telegram
 
-    curl --fail-with-body --silent --show-error \
-        --retry 3 \
-        --retry-delay 2 \
-        "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-        --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-        --data-urlencode "parse_mode=HTML" \
-        --data-urlencode "disable_web_page_preview=true" \
-        --data-urlencode "text=${text}" >/dev/null
-}
+# ============================================================
 
-# Telegram 单条消息建议控制在 3800 字符以内
-message=""
-
-for line in "${notification_lines[@]}"; do
-    if (( ${#message} + ${#line} + 1 > 3800 )); then
-        if [[ -n "$message" ]]; then
-            send_telegram "$message"
-        fi
-
-        message="<b>🌐 DigitalPlat 域名状态（续）</b>"
-    fi
-
-    if [[ -n "$message" ]]; then
-        message+=$'\n'
-    fi
-
-    message+="$line"
-done
-
-if [[ -n "$message" ]]; then
-    send_telegram "$message"
-fi
-
-echo "Telegram 通知已发送"
-echo "域名总数: ${renewal_count}"
-echo "需要续期: ${renewal_needed}"
-echo "已过期: ${expired_count}"
-echo "永久域名: ${permanent_count}"
+send_telegram_message "$TELEGRAM_MESSAGE"
