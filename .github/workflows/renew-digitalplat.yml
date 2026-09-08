@@ -3,8 +3,8 @@ name: DigitalPlat Domains Renew
 on:
   workflow_dispatch:
   schedule:
-    # 每天北京时间 09:00（UTC 01:00）
-    - cron: "0 1 * * *"
+    # 每月10号北京时间 15:00（UTC 07:00）
+    - cron: "0 7 10 * *"
 
 jobs:
   renew:
