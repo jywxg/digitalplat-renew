@@ -57,11 +57,25 @@ send_tg() {
     return "$ok"
 }
 
+# 将 API 的 YYYYMMDD 到期时间转换为 YYYY-MM-DD（如 20271225 -> 2027-12-25）
+normalize_expiry() {
+    local v="$1"
+    if [[ "$v" =~ ^[0-9]{8}$ ]]; then
+        echo "${v:0:4}-${v:4:2}-${v:6:2}"
+    else
+        echo "$v"
+    fi
+}
+
 # 计算续期状态，输出: 剩余天数|续期状态
 # 状态: 可续期(窗口内, 到期前120天) / 未到窗口(还需等N天) / 已过期 / 永久 / 未知
 calc_status() {
     local expiry="$1"
-    if [[ "$expiry" == "null" || -z "$expiry" || "$expiry" == "permanent" || "$expiry" == "PERMANENT" ]]; then
+    if [[ "$expiry" == "null" || -z "$expiry" ]]; then
+        echo "-|未知"
+        return
+    fi
+    if [[ "$expiry" == "permanent" || "$expiry" == "PERMANENT" ]]; then
         echo "-|永久"
         return
     fi
@@ -170,19 +184,22 @@ check_account() {
         return 1
     fi
 
-    # 解析域名数据
+    # 解析域名数据（真实 API 字段: domain / status / expires_at(YYYYMMDD) / slot_type / lifecycle_type）
+    # 注意: 缺失字段输出 "null" 而非空串，避免 bash read 折叠连续 tab 导致列错位
     domains_tmp=$(mktemp)
-    jq -r '.[] | [.name, .status, .expiry_date, .slot_type, .lifecycle_type] | @tsv' <<<"$domain_list" | \
+    jq -r '.[] | [(.domain // "null"), (.status // "null"), (.expires_at // "null"), (.slot_type // "null"), (.lifecycle_type // "null")] | @tsv' <<<"$domain_list" | \
         while IFS=$'\t' read -r name status expiry_date slot_type lifecycle_type; do
+            expiry_date=$(normalize_expiry "$expiry_date")
             echo "$name|$status|$expiry_date|$slot_type|$lifecycle_type"
         done > "$domains_tmp"
 
     # 如果没有解析到数据，尝试字段名不同的情况
     if [[ ! -s "$domains_tmp" ]]; then
         echo "警告: 未解析到数据，尝试其他字段名..." >&2
-        jq -r '.[] | [.name // .domain, .status // .state, .expiry_date // .expiry // .expire, .slot_type // .slot, .lifecycle_type // .lifecycle // .type] | @tsv' <<<"$domain_list" | \
+        jq -r '.[] | [(.domain // .name // "null"), (.status // .state // "null"), (.expires_at // .expiry // .expiration // .expire // "null"), (.slot_type // .slot // "null"), (.lifecycle_type // .lifecycle // .type // "null")] | @tsv' <<<"$domain_list" | \
             while IFS=$'\t' read -r name status expiry_date slot_type lifecycle_type; do
                 if [[ -n "$name" && "$name" != "null" ]]; then
+                    expiry_date=$(normalize_expiry "$expiry_date")
                     echo "${name}|${status}|${expiry_date}|${slot_type}|${lifecycle_type}"
                 fi
             done > "$domains_tmp"
