@@ -21,6 +21,7 @@
 ## 📋 功能
 
 - ✅ 通过 DigitalPlat API v1 获取域名列表（cloudscraper 绕过 Cloudflare 验证）
+- ✅ **支持多账号**：多个 DigitalPlat API Key 批量检查，逐账号独立通知（标题带账号名），单个账号失败不影响其他账号
 - ✅ 兼容多种 API 响应格式（`{success,data}` / 直接数组 / `{data}`）
 - ✅ 检查每个域名的到期时间，自动识别永久到期
 - ✅ 标记 120 天窗口内需续期的域名
@@ -40,14 +41,17 @@
 
 | Secret | 说明 |
 |--------|------|
-| `DIGITALPLAT_API_KEY` | DigitalPlat API Bearer Token |
+| `DIGITALPLAT_ACCOUNTS` | **多账号**：每行一个 `名称,API_KEY`（换行或分号分隔），例如 `账号A,key_a` + 换行 + `账号B,key_b` |
+| `DIGITALPLAT_API_KEY` | （兼容旧版）单账号 API Bearer Token；名称默认为 `DigitalPlat` |
 | `TELEGRAM_BOT_TOKEN` | Telegram Bot Token |
 | `TELEGRAM_CHAT_ID` | 接收通知的 Chat ID |
 
-4. 到 **Actions** 页面手动触发一次 `renew-digitalplat` 工作流验证配置
-5. 成功后，工作流会按 Schedule 每天自动运行
+> 💡 同时设置 `DIGITALPLAT_ACCOUNTS` 与 `DIGITALPLAT_API_KEY` 时，优先使用 `DIGITALPLAT_ACCOUNTS`。
 
-**Schedule：** 每天北京时间 09:00（UTC 01:00）
+4. 到 **Actions** 页面手动触发一次 `renew-digitalplat` 工作流验证配置
+5. 成功后，工作流会按 Schedule 定时自动运行
+
+**Schedule：** 每月 10 号北京时间 15:00（UTC 07:00）
 
 ---
 
@@ -61,8 +65,12 @@ cd digitalplat-renew
 pip3 install cloudscraper
 brew install jq  # macOS
 
-# 设置环境变量
-export DIGITALPLAT_API_KEY="***"
+# 多账号：每行一个 名称,API_KEY（换行或分号分隔）
+export DIGITALPLAT_ACCOUNTS="账号A,key_a
+账号B,key_b;账号C,key_c"
+# 或单账号（兼容旧版）
+# export DIGITALPLAT_API_KEY="***"
+
 export TELEGRAM_BOT_TOKEN="***"
 export TELEGRAM_CHAT_ID="your_chat_id"
 
@@ -78,10 +86,10 @@ chmod +x renew-digitalplat-subdomains.sh
 工作流文件：`.github/workflows/renew-digitalplat.yml`
 
 ```yaml
-name: 免费域名续期检查
+name: DigitalPlat Domains Renew
 on:
   schedule:
-    - cron: '0 1 * * *'   # UTC 01:00 = 北京时间 09:00
+    - cron: '0 7 10 * *'   # 每月10号 UTC 07:00 = 北京时间 15:00
   workflow_dispatch:       # 支持手动触发
 ```
 
@@ -121,3 +129,17 @@ on:
 **认证：** `Authorization: Bearer *** `dp_test_xxx`（测试）
 
 > API 未暴露 renewal 端点，续期需在 Dashboard 手动操作。
+
+---
+
+## 📊 输出说明
+
+每个域名显示 **到期时间、剩余天数、续期状态**（表格 + Telegram 通知）：
+
+| 状态 | 含义 |
+|------|------|
+| `可续期` | 已进入 120 天免费续期窗口，可前往 Dashboard 续期 |
+| `未到窗口(还需N天)` | 距到期超过 120 天，暂时还不能续期 |
+| `已过期` | 已超过到期日，需尽快处理 |
+| `永久` | 永久有效域名，无需续期 |
+| `未知` | 到期时间无法解析 |
