@@ -6,6 +6,10 @@ on:
     # 每月10号北京时间 15:00（UTC 07:00）
     - cron: "0 7 10 * *"
 
+permissions:
+  contents: write
+  actions: write
+
 jobs:
   renew:
     runs-on: ubuntu-latest
@@ -37,3 +41,41 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           ./renew-digitalplat-subdomains.sh
+
+      - name: Update run record
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          echo "最后运行时间: $(date +'%Y-%m-%d %H:%M:%S')" > time.txt
+          git add time.txt
+          if git diff --cached --quiet; then
+            echo "无变化，无需提交"
+          else
+            git commit -m "⏱️ 自动更新运行记录，保活 Actions"
+            git stash -u || true
+            git pull origin main --rebase --autostash || git pull origin main
+            git stash pop || true
+            git push origin HEAD:main
+          fi
+
+      - name: Clean history runs
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO="${{ github.repository }}"
+          echo "🧹 清理历史运行记录（只保留本次 run: $GITHUB_RUN_ID）"
+          # gh --paginate 自动翻页，全仓库所有 run 全部拉出
+          runs=$(gh api "repos/$REPO/actions/runs?per_page=100" --paginate -q '.workflow_runs[].id' 2>/dev/null || true)
+          deleted=0
+          for run in $runs; do
+            if [ "$run" != "$GITHUB_RUN_ID" ]; then
+              echo "  删除历史记录 ID: $run"
+              gh api -X DELETE "repos/$REPO/actions/runs/$run" --silent || true
+              deleted=$((deleted + 1))
+            fi
+          done
+          echo "✅ 已清理 $deleted 条历史运行记录"
