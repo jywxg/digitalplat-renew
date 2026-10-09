@@ -23,7 +23,7 @@
 - ✅ 通过 DigitalPlat API v1 获取域名列表（cloudscraper 绕过 Cloudflare 验证）
 - ✅ **支持多账号**：多个 DigitalPlat API Key 批量检查，逐账号独立通知（标题带账号名），单个账号失败不影响其他账号
 - ✅ 兼容多种 API 响应格式（`{success,data}` / 直接数组 / `{data}`）
-- ✅ 检查每个域名的到期时间，自动识别永久到期
+- ✅ 检查每个域名的到期时间（API 字段 `expires_at`，自动把 `YYYYMMDD` 转为 `YYYY-MM-DD`）
 - ✅ 标记 120 天窗口内需续期的域名
 - ✅ 打印终端表格概览
 - ✅ 通过 Telegram Bot 发送通知（支持长消息分片）
@@ -141,5 +141,5 @@ on:
 | `可续期` | 已进入 120 天免费续期窗口，可前往 Dashboard 续期 |
 | `未到窗口(还需N天)` | 距到期超过 120 天，暂时还不能续期 |
 | `已过期` | 已超过到期日，需尽快处理 |
-| `永久` | 永久有效域名，无需续期 |
-| `未知` | 到期时间无法解析 |
+| `永久` | API 返回的到期值字面为 `permanent`（DigitalPlat 免费域名 `lifecycle_type` 恒为 permanent，**真实到期日请看 `expires_at` 列**，本状态极少出现） |
+| `未知` | 到期时间缺失/无法解析 |
